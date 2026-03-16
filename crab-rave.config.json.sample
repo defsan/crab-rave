@@ -1,0 +1,45 @@
+{
+  "agents": [
+    {
+      "name": "default",
+      "model_name": "claude-sonnet-direct",
+      "workfolder": "./",
+      "communication": "telegram"
+    },
+    {
+      "name": "coder",
+      "model_name": "qwen3-coder",
+      "workfolder": "~/crabs/coder",
+      "communication": "default"
+    },
+    {
+      "name": "coder2",
+      "model_name": "claude-sonnet-direct",
+      "workfolder": "~/crabs/coder",
+      "communication": "default"
+    },
+    {
+      "name": "karp",
+      "model_name": "claude-sonnet-direct",
+      "workfolder": "~/crabs/karp",
+      "communication": "telegram",
+      "default_context": ["AGENT.md"]
+    }
+  ],
+  "models": [
+    { "name": "claude-sonnet", "type": "claude-cli", "model": "claude-sonnet-4-6" },
+    { "name": "claude-opus", "type": "claude-cli", "model": "claude-opus-4-6" },
+    { "name": "claude-sonnet-direct", "type": "claude-api", "model": "claude-sonnet-4-6", "key": "YOUR_ANTHROPIC_API_KEY" },
+    { "name": "claude-opus-direct", "type": "claude-api", "model": "claude-opus-4-6", "key": "YOUR_ANTHROPIC_API_KEY" },
+    { "name": "qwen3-coder", "type": "ollama", "model": "qwen3-coder:30b", "url": "http://localhost:11434" }
+  ],
+  "communications": [
+    { "name": "default", "type": "cli" },
+    { "name": "telegram", "type": "telegram", "key": "YOUR_TELEGRAM_BOT_TOKEN", "chat_ids": [123456789] }
+  ],
+  "logFile": "./crab-rave.log",
+  "loop": {
+    "maxRetries": 3,
+    "maxAgentIterations": 20
+  }
+}
