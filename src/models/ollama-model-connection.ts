@@ -4,9 +4,16 @@ import type { Logger } from "../logging/logger.js";
 import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { ToolSchema } from "../tools/base-tool.js";
 
+function wrapFetchError(err: unknown, context: string): Error {
+  const cause = (err as { cause?: unknown }).cause;
+  const detail = cause instanceof Error ? cause.message : (err instanceof Error ? err.message : String(err));
+  return new Error(`${context}: ${detail}`);
+}
+
 interface OllamaMessage {
   role: "user" | "assistant" | "tool";
   content: string;
+  images?: string[];
 }
 
 interface OllamaToolCall {
@@ -42,17 +49,20 @@ export class OllamaModelConnection extends BaseModelConnection {
   }
 
   async connect(): Promise<void> {
+    const url = `${this.baseUrl}/api/tags`;
+    let response: Response;
     try {
-      const response = await fetch(`${this.baseUrl}/api/tags`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      this.connectionStatus = "connected";
-      this.logger.info("Ollama connection established", { model: this.model, url: this.baseUrl });
+      response = await fetch(url);
     } catch (err) {
       this.connectionStatus = "error";
-      throw new Error(
-        `Cannot reach Ollama at ${this.baseUrl}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      throw wrapFetchError(err, `Cannot reach Ollama at ${url}`);
     }
+    if (!response.ok) {
+      this.connectionStatus = "error";
+      throw new Error(`Cannot reach Ollama at ${url}: HTTP ${response.status}`);
+    }
+    this.connectionStatus = "connected";
+    this.logger.info("Ollama connection established", { model: this.model, url: this.baseUrl });
   }
 
   modelId(): string { return this.model; }
@@ -92,23 +102,29 @@ export class OllamaModelConnection extends BaseModelConnection {
 
   private async callApi(messages: OllamaMessage[], system: string, signal?: AbortSignal): Promise<OllamaResponse> {
     const tools: ToolSchema[] = this.toolRegistry?.toOllamaTools() ?? [];
+    const url = `${this.baseUrl}/api/chat`;
 
-    const response = await fetch(`${this.baseUrl}/api/chat`, {
-      method: "POST",
-      signal,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: this.model,
-        system,
-        messages,
-        stream: false,
-        ...(tools.length > 0 ? { tools } : {}),
-      }),
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        signal,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: this.model,
+          system,
+          messages,
+          stream: false,
+          ...(tools.length > 0 ? { tools } : {}),
+        }),
+      });
+    } catch (err) {
+      throw wrapFetchError(err, `Ollama API (${url})`);
+    }
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`Ollama API error ${response.status}: ${body}`);
+      throw new Error(`Ollama API error ${response.status} (${url}): ${body}`);
     }
 
     return response.json() as Promise<OllamaResponse>;
@@ -167,7 +183,9 @@ export class OllamaModelConnection extends BaseModelConnection {
           content: `Tool result (${msg.toolName ?? "unknown"}):\n${msg.content}`,
         };
       }
-      return { role: msg.role, content: msg.content };
+      const out: OllamaMessage = { role: msg.role, content: msg.content };
+      if (msg.images?.length) out.images = msg.images;
+      return out;
     });
   }
 }

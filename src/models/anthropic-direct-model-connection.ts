@@ -5,6 +5,12 @@ import type { Logger } from "../logging/logger.js";
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
+function wrapFetchError(err: unknown, context: string): Error {
+  const cause = (err as { cause?: unknown }).cause;
+  const detail = cause instanceof Error ? cause.message : (err instanceof Error ? err.message : String(err));
+  return new Error(`${context}: ${detail}`);
+}
+
 // Required for OAuth tokens on non-streaming requests — not needed for regular API keys
 const BETA_OAUTH = ["claude-code-20250219", "oauth-2025-04-20"];
 
@@ -116,28 +122,35 @@ export class AnthropicDirectModelConnection extends BaseModelConnection {
     signal?: AbortSignal,
   ): Promise<AnthropicResponse> {
     const betaHeader = this.buildBetaHeaders();
-    const response = await fetch(ANTHROPIC_API_URL, {
-      method: "POST",
-      signal,
-      headers: {
-        "content-type": "application/json",
-        ...(isOAuthToken(this.token!)
-          ? { authorization: `Bearer ${this.token!}` }
-          : { "x-api-key": this.token! }),
-        "anthropic-version": ANTHROPIC_VERSION,
-        ...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
-      },
-      body: JSON.stringify({
-        model: this.model,
-        max_tokens: maxTokens,
-        system,
-        messages,
-      }),
-    });
+
+    let response: Response;
+    try {
+      response = await fetch(ANTHROPIC_API_URL, {
+        method: "POST",
+        signal,
+        headers: {
+          "content-type": "application/json",
+          ...(isOAuthToken(this.token!)
+            ? { authorization: `Bearer ${this.token!}` }
+            : { "x-api-key": this.token! }),
+          "anthropic-version": ANTHROPIC_VERSION,
+          ...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
+        },
+        body: JSON.stringify({
+          model: this.model,
+          max_tokens: maxTokens,
+          system,
+          messages,
+        }),
+      });
+    } catch (err) {
+      throw wrapFetchError(err, `Anthropic API (${ANTHROPIC_API_URL})`);
+    }
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`Anthropic API error ${response.status}: ${body}`);
+      const masked = `${this.token!.slice(0, 16)}...${this.token!.slice(-4)}`;
+      throw new Error(`Anthropic API error ${response.status}: ${body} (key: ${masked})`);
     }
 
     return response.json() as Promise<AnthropicResponse>;

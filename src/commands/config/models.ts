@@ -24,9 +24,10 @@ ${chalk.yellow("COMMANDS")}
   test   --name <n>                  Send a test message to verify connectivity
 
 ${chalk.yellow("MODEL TYPES")}
-  claude-cli        Uses the local claude CLI
-  claude-api  Calls the Anthropic API directly (requires --key or env var)
-  ollama            Calls a local Ollama instance (requires --url, e.g. http://localhost:11434)
+  claude-cli    Uses the local claude CLI
+  claude-api    Calls the Anthropic API directly (requires --key or ANTHROPIC_API_KEY)
+  ollama        Calls a local Ollama instance (requires --url, e.g. http://localhost:11434)
+  openrouter    Routes through OpenRouter (requires --key or OPENROUTER_API_KEY)
 
 ${chalk.yellow("OPTIONS")}
   --config <path>   Config file to read/write
@@ -92,8 +93,8 @@ function modelsAdd(args: ParsedArgs, configPath: string): void {
     process.exit(1);
   }
 
-  if (type !== "claude-cli" && type !== "claude-api" && type !== "ollama") {
-    console.error(chalk.red('--type must be "claude-cli", "claude-api", or "ollama"'));
+  if (type !== "claude-cli" && type !== "claude-api" && type !== "ollama" && type !== "openrouter") {
+    console.error(chalk.red('--type must be "claude-cli", "claude-api", "ollama", or "openrouter"'));
     process.exit(1);
   }
 

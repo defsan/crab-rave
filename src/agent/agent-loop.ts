@@ -4,7 +4,7 @@ import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { Logger } from "../logging/logger.js";
 import type { LoopConfig as AgentConfig } from "../config/types.js";
 import { buildSystemPrompt } from "./message-builder.js";
-import { logPrompt } from "../logging/prompt-logger.js";
+import { logPromptRoundTrip } from "../logging/prompt-logger.js";
 import { compactContext } from "./context-compactor.js";
 import chalk from "chalk";
 
@@ -44,16 +44,14 @@ async function runSingleAttempt(
   signal?: AbortSignal,
   customSystemPrompt?: string,
   agentContext?: string,
+  workfolder?: string,
+  agentName?: string,
 ): Promise<TimedLLMResponse> {
   signal?.throwIfAborted();
 
   const systemPrompt = buildSystemPrompt(toolRegistry, customSystemPrompt, agentContext);
 
-  await compactContext(messages, modelConnection, logger, signal);
-
-  if (config.promptLog) {
-    logPrompt(config.promptLog, systemPrompt, messages);
-  }
+  await compactContext(messages, modelConnection, logger, signal, estimateTokens(systemPrompt), workfolder, agentName);
 
   modelConnection.setToolRegistry(toolRegistry);
 
@@ -64,8 +62,33 @@ async function runSingleAttempt(
   logger.debug("Layer 3: running single attempt", { messageCount: messages.length });
 
   const t0 = Date.now();
-  const response = await modelConnection.prompt(messages, systemPrompt, signal);
+  let response: LLMResponse;
+  try {
+    response = await modelConnection.prompt(messages, systemPrompt, signal);
+  } catch (err) {
+    if (config.promptLog) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logPromptRoundTrip(config.promptLog, {
+        systemPrompt,
+        messages,
+        modelId: modelConnection.modelId(),
+        errorMessage,
+        toolCalls: [],
+      });
+    }
+    throw err;
+  }
   const durationMs = Date.now() - t0;
+
+  if (config.promptLog) {
+    logPromptRoundTrip(config.promptLog, {
+      systemPrompt,
+      messages,
+      modelId: modelConnection.modelId(),
+      responseText: response.text,
+      toolCalls: response.toolCalls,
+    });
+  }
 
   const outputTokens = estimateTokens(response.text);
   const tokensPerSecond = durationMs > 0 ? Math.round((outputTokens / durationMs) * 1000) : 0;
@@ -93,9 +116,12 @@ async function runAgentTurn(
   signal?: AbortSignal,
   customSystemPrompt?: string,
   agentContext?: string,
-): Promise<{ text: string; stats: PromptStats }> {
+  workfolder?: string,
+  agentName?: string,
+): Promise<{ text: string; stats: PromptStats; totalInputTokens: number; iterations: number; exhausted?: boolean }> {
   let iterations = 0;
   let lastStats: PromptStats = { inputTokens: 0, outputTokens: 0, durationMs: 0, tokensPerSecond: 0 };
+  let totalInputTokens = 0;
 
   while (iterations < config.maxAgentIterations) {
     signal?.throwIfAborted();
@@ -111,8 +137,11 @@ async function runAgentTurn(
       signal,
       customSystemPrompt,
       agentContext,
+      workfolder,
+      agentName,
     );
     lastStats = response.stats;
+    totalInputTokens += response.stats.inputTokens;
 
     if (config.verbose) {
       console.log(
@@ -127,7 +156,7 @@ async function runAgentTurn(
     }
 
     if (response.toolCalls.length === 0) {
-      return { text: response.text, stats: lastStats };
+      return { text: response.text, stats: lastStats, totalInputTokens, iterations };
     }
 
     // Append assistant message (with tool calls still in text)
@@ -174,6 +203,9 @@ async function runAgentTurn(
   return {
     text: "I've reached the maximum number of tool iterations. Here's what I have so far based on my work above.",
     stats: lastStats,
+    totalInputTokens,
+    iterations,
+    exhausted: true,
   };
 }
 
@@ -188,8 +220,13 @@ export async function runAgentLoop(
   customSystemPrompt?: string,
   agentContext?: string,
   signal?: AbortSignal,
+  images?: string[],
+  workfolder?: string,
+  agentName?: string,
 ): Promise<AgentResult> {
-  const messages = [...conversationHistory, { role: "user" as const, content: userMessage }];
+  const userMsg: Message = { role: "user", content: userMessage };
+  if (images?.length) userMsg.images = images;
+  const messages = [...conversationHistory, userMsg];
 
   let lastError: unknown;
 
@@ -197,7 +234,7 @@ export async function runAgentLoop(
     try {
       logger.info("Layer 1: attempt", { attempt, maxRetries: config.maxRetries });
 
-      const { text, stats } = await runAgentTurn(
+      const { text, stats, totalInputTokens, iterations, exhausted } = await runAgentTurn(
         messages,
         modelConnection,
         toolRegistry,
@@ -206,11 +243,13 @@ export async function runAgentLoop(
         signal,
         customSystemPrompt,
         agentContext,
+        workfolder,
+        agentName,
       );
 
       messages.push({ role: "assistant", content: text });
 
-      return { response: text, messages, stats };
+      return { response: text, messages, stats, totalInputTokens, iterations, exhausted };
     } catch (err) {
       lastError = err;
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -230,5 +269,5 @@ export async function runAgentLoop(
 
   throw lastError ?? new Error("Agent loop failed after all retries");
   // unreachable — satisfies TypeScript's return type
-  return { response: "", messages, stats: { inputTokens: 0, outputTokens: 0, durationMs: 0, tokensPerSecond: 0 } };
+  return { response: "", messages, stats: { inputTokens: 0, outputTokens: 0, durationMs: 0, tokensPerSecond: 0 }, totalInputTokens: 0, iterations: 0 };
 }

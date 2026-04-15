@@ -6,13 +6,16 @@ import { ToolRegistry } from "../tools/tool-registry.js";
 import { ExecTool } from "../tools/exec-tool.js";
 import { FsTool } from "../tools/fs-tool.js";
 import { WebTool } from "../tools/web-tool.js";
+import { MemoryDb } from "../tools/memory-db.js";
+import { RecallTool } from "../tools/recall-tool.js";
+import { RememberTool } from "../tools/remember-tool.js";
 import { loadAgentContext } from "./context-loader.js";
 
 export interface ResolvedAgent {
   agentDef: AgentDef;
   connection: BaseModelConnection;
   toolRegistry: ToolRegistry;
-  /** Combined content of AGENT.md + MEMORY.md from the workfolder, if present */
+  /** Context loaded from default_context config or auto-discovered AGENTS.md/AGENT.md, if present */
   context: string | undefined;
   /** The message with the agent prefix stripped, if one was present */
   message: string;
@@ -21,6 +24,7 @@ export interface ResolvedAgent {
 export class AgentRouter {
   private connections = new Map<string, BaseModelConnection>();
   private toolRegistries = new Map<string, ToolRegistry>();
+  private memoryDbs = new Map<string, MemoryDb>();
 
   constructor(
     private config: CrabRaveConfig,
@@ -85,7 +89,12 @@ export class AgentRouter {
       const registry = new ToolRegistry();
       registry.register(new ExecTool(agentDef.workfolder));
       registry.register(new FsTool(agentDef.workfolder));
-      registry.register(new WebTool());
+      const webTool = new WebTool();
+      registry.register(webTool);
+      const memoryDb = new MemoryDb(agentDef.workfolder);
+      this.memoryDbs.set(agentDef.name, memoryDb);
+      registry.register(new RecallTool(memoryDb, webTool));
+      registry.register(new RememberTool(memoryDb, agentDef.workfolder));
       this.toolRegistries.set(agentDef.name, registry);
     }
     return this.toolRegistries.get(agentDef.name)!;
@@ -100,7 +109,7 @@ export class AgentRouter {
       agentDef,
       connection,
       toolRegistry: this.getToolRegistry(agentDef),
-      context: loadAgentContext(agentDef.workfolder),
+      context: loadAgentContext(agentDef),
       message,
     };
   }

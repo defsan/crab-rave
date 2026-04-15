@@ -4,12 +4,13 @@ import type { BaseModelConnection } from "./base-model-connection.js";
 import { ClaudeTokenModelConnection } from "./claude-token-model-connection.js";
 import { AnthropicDirectModelConnection } from "./anthropic-direct-model-connection.js";
 import { OllamaModelConnection } from "./ollama-model-connection.js";
+import { OpenRouterModelConnection } from "./openrouter-model-connection.js";
 
 export function createModelConnection(modelDef: ModelDef, logger: Logger): BaseModelConnection {
   const model = modelDef.model ?? "";
 
   if (modelDef.type === "claude-cli") {
-    return new ClaudeTokenModelConnection(model, logger);
+    return new ClaudeTokenModelConnection(model, logger, modelDef.key);
   }
 
   if (modelDef.type === "claude-api") {
@@ -19,6 +20,10 @@ export function createModelConnection(modelDef: ModelDef, logger: Logger): BaseM
   if (modelDef.type === "ollama") {
     if (!modelDef.url) throw new Error(`Model "${modelDef.name}" is missing required "url" for ollama type`);
     return new OllamaModelConnection(model, modelDef.url, logger);
+  }
+
+  if (modelDef.type === "openrouter") {
+    return new OpenRouterModelConnection(model, modelDef.key, logger, modelDef.url);
   }
 
   throw new Error(`Unsupported model type: ${(modelDef as ModelDef).type}`);

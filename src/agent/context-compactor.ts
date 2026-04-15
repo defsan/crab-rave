@@ -5,6 +5,7 @@ import type { Message } from "./types.js";
 import type { BaseModelConnection } from "../models/base-model-connection.js";
 import type { Logger } from "../logging/logger.js";
 import { estimateTokens } from "./agent-loop.js";
+import { autoSaveSession } from "../chat/common-commands.js";
 
 const COMPACTION_THRESHOLD = 10_000; // tokens — triggers summarization
 const RECOMPRESS_THRESHOLD = 5_000;  // tokens — summary itself is too large
@@ -29,21 +30,31 @@ function messagesToText(messages: Message[]): string {
  * Compacts the messages array IN-PLACE if total tokens exceed the threshold.
  * Preserves the last KEEP_RECENT messages verbatim; summarizes the rest via the model.
  * If the resulting summary is still too large, runs a second focused compression pass.
+ *
+ * @param systemPromptTokens - estimated token count of the system prompt, so the threshold
+ *   check matches the actual context size sent to the model (messages + system prompt).
  */
 export async function compactContext(
   messages: Message[],
   modelConnection: BaseModelConnection,
   logger: Logger,
   signal?: AbortSignal,
+  systemPromptTokens = 0,
+  workfolder?: string,
+  agentName?: string,
 ): Promise<void> {
   if (messages.length <= KEEP_RECENT) return;
 
-  const totalTokens = estimateTokens(messages.map((m) => m.content).join(""));
+  const messageTokens = estimateTokens(messages.map((m) => m.content).join(""));
+  const totalTokens = messageTokens + systemPromptTokens;
   if (totalTokens <= COMPACTION_THRESHOLD) return;
 
-  logger.info("Context compaction triggered", { totalTokens, messageCount: messages.length });
+  logger.info("Context compaction triggered", { totalTokens, messageTokens, systemPromptTokens, messageCount: messages.length });
 
   const toSummarize = messages.slice(0, messages.length - KEEP_RECENT);
+
+  // Persist full conversation before it gets compressed
+  if (workfolder && agentName) autoSaveSession(workfolder, agentName, messages);
 
   // First pass — general summary
   const summaryResponse = await modelConnection.prompt(

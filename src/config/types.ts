@@ -1,6 +1,6 @@
 export interface ModelDef {
   name: string;
-  type: "claude-cli" | "claude-api" | "ollama";
+  type: "claude-cli" | "claude-api" | "ollama" | "openrouter";
   /** Model ID used verbatim in API calls */
   model?: string;
   /** API key or token. Falls back to env vars when omitted. */

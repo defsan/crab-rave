@@ -1,7 +1,4 @@
 import { useState, useRef, useCallback } from "react";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { Box, Text, Static, useApp, useInput, render } from "ink";
 import TextInput from "ink-text-input";
 import type { Message } from "../agent/types.js";
@@ -11,6 +8,12 @@ import type { AgentRouter } from "../agent/agent-router.js";
 import { runAgentLoop, estimateTokens, isAbortError } from "../agent/agent-loop.js";
 import { loadDefaultContextMessages } from "../agent/context-loader.js";
 import { offloadToolOutputs } from "../agent/context-compactor.js";
+import {
+  buildHelp,
+  handleCommonCommand,
+  autoSaveSession,
+  type CommandContext,
+} from "../chat/common-commands.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,6 +28,8 @@ interface Stats {
   model: string;
   tokensPerSecond: number | null;
   contextTokens: number;
+  iterations: number | null;
+  durationMs: number | null;
 }
 
 interface ChatProps {
@@ -32,75 +37,6 @@ interface ChatProps {
   defaultAgentName: string;
   logger: Logger;
   agentConfig: LoopConfig;
-}
-
-// ── Commands ─────────────────────────────────────────────────────────────────
-
-const COMMANDS: Record<string, { usage: string; description: string }> = {
-  help:   { usage: "/help",          description: "Show available commands" },
-  agents: { usage: "/agents",        description: "List all configured agents" },
-  agent:  { usage: "/agent <name>",  description: "Switch active agent" },
-  new:    { usage: "/new",           description: "Reset current agent's conversation context" },
-  clear:  { usage: "/clear",         description: "Reset all agents' conversation contexts" },
-  store:  { usage: "/store",         description: "Save current context to memory/session-<date>-<n>.md" },
-  abort:  { usage: "/abort",         description: "Abort the running agent (also: Esc key)" },
-  exit:   { usage: "/exit",          description: "Exit the chat" },
-};
-
-function buildHelp(): string {
-  const lines = ["Available commands:"];
-  for (const { usage, description } of Object.values(COMMANDS)) {
-    lines.push(`  ${usage.padEnd(20)} ${description}`);
-  }
-  return lines.join("\n");
-}
-
-// ── Session storage helpers ───────────────────────────────────────────────────
-
-function expandWorkfolder(p: string): string {
-  if (p === "~") return os.homedir();
-  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
-  return p;
-}
-
-function resolveSessionPath(workfolder: string): string {
-  const dir = path.join(expandWorkfolder(workfolder), "memory");
-  mkdirSync(dir, { recursive: true });
-
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const prefix = `session-${today}-`;
-
-  const existing = existsSync(dir)
-    ? readdirSync(dir).filter((f) => f.startsWith(prefix) && f.endsWith(".md"))
-    : [];
-
-  const numbers = existing
-    .map((f) => parseInt(f.slice(prefix.length, -3), 10))
-    .filter((n) => !isNaN(n));
-
-  const next = numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
-  return path.join(dir, `${prefix}${next}.md`);
-}
-
-function writeSessionFile(filePath: string, agentName: string, messages: Message[]): void {
-  const date = new Date().toISOString().replace("T", " ").slice(0, 19);
-  const lines: string[] = [
-    `# Session — ${agentName}`,
-    `_Saved: ${date}_`,
-    "",
-  ];
-
-  for (const msg of messages) {
-    if (msg.role === "user") {
-      lines.push(`## You\n\n${msg.content}\n`);
-    } else if (msg.role === "assistant") {
-      lines.push(`## Assistant\n\n${msg.content}\n`);
-    } else if (msg.role === "tool") {
-      lines.push(`## Tool: ${msg.toolName ?? "unknown"}\n\n${msg.content}\n`);
-    }
-  }
-
-  writeFileSync(filePath, lines.join("\n"), "utf-8");
 }
 
 // ── Sub-components ───────────────────────────────────────────────────────────
@@ -159,6 +95,11 @@ function StatusBarView({
   if (stats.model) parts.push(`model: ${stats.model}`);
   if (stats.tokensPerSecond !== null) parts.push(`${stats.tokensPerSecond} tok/s`);
   if (stats.contextTokens > 0) parts.push(`ctx: ~${stats.contextTokens} tok`);
+  if (stats.iterations !== null) parts.push(`${stats.iterations} iter`);
+  if (stats.durationMs !== null) {
+    const d = stats.durationMs;
+    parts.push(d < 60_000 ? `${(d / 1000).toFixed(1)}s` : `${Math.floor(d / 60_000)}m ${Math.round((d % 60_000) / 1000)}s`);
+  }
   if (isThinking) parts.push("thinking...");
 
   const bar = ` ${parts.join("  ·  ")}`.padEnd(cols).slice(0, cols);
@@ -181,9 +122,10 @@ function ChatApp({ router, defaultAgentName, logger, agentConfig }: ChatProps) {
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
   const [activeAgent, setActiveAgent] = useState(defaultAgentName);
-  const [stats, setStats] = useState<Stats>({ model: "", tokensPerSecond: null, contextTokens: 0 });
+  const [stats, setStats] = useState<Stats>({ model: "", tokensPerSecond: null, contextTokens: 0, iterations: null, durationMs: null });
 
   const historiesRef = useRef(new Map<string, Message[]>());
+  const lastActivityRef = useRef(new Map<string, number>());
   const nextId = useRef(10);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -198,29 +140,29 @@ function ChatApp({ router, defaultAgentName, logger, agentConfig }: ChatProps) {
   }, []);
 
   const handleCommand = useCallback(
-    (raw: string): boolean => {
+    async (raw: string): Promise<boolean> => {
       if (!raw.startsWith("/")) return false;
 
       const [cmd, ...argParts] = raw.slice(1).trim().split(/\s+/);
       const arg = argParts.join(" ");
+      const cmdLower = cmd.toLowerCase();
 
-      switch (cmd.toLowerCase()) {
-        case "help":
-          addMessage({ role: "info", text: buildHelp() });
-          break;
+      const ctx: CommandContext = {
+        channel: "cli",
+        activeAgent,
+        router,
+        getHistory: (agentName) => historiesRef.current.get(agentName) ?? [],
+        clearHistory: (agentName?) => {
+          if (agentName) historiesRef.current.delete(agentName);
+          else historiesRef.current.clear();
+        },
+        respond: (text, isError) => addMessage({ role: isError ? "error" : "info", text }),
+      };
 
-        case "agents": {
-          const agents = router.getAgents();
-          const lines = ["Configured agents:"];
-          for (const a of agents) {
-            const alias = a.alias ? `  alias: ${a.alias}` : "";
-            const marker = a.name === activeAgent ? " ◀ active" : "";
-            lines.push(`  ${a.name.padEnd(16)} model: ${a.model_name}${alias}${marker}`);
-          }
-          addMessage({ role: "info", text: lines.join("\n") });
-          break;
-        }
+      if (await handleCommonCommand(cmdLower, arg, ctx)) return true;
 
+      // CLI-specific commands
+      switch (cmdLower) {
         case "agent": {
           if (!arg) {
             addMessage({ role: "error", text: "Usage: /agent <name>" });
@@ -241,37 +183,6 @@ function ChatApp({ router, defaultAgentName, logger, agentConfig }: ChatProps) {
           break;
         }
 
-        case "new":
-          historiesRef.current.delete(activeAgent);
-          addMessage({ role: "info", text: `Context reset for agent: ${activeAgent}` });
-          break;
-
-        case "clear":
-          historiesRef.current.clear();
-          addMessage({ role: "info", text: "All agents' conversation contexts cleared." });
-          break;
-
-        case "store": {
-          const history = historiesRef.current.get(activeAgent) ?? [];
-          if (history.length === 0) {
-            addMessage({ role: "error", text: "Nothing to store — conversation is empty." });
-            break;
-          }
-          const agentDef = router.getAgents().find((a) => a.name === activeAgent);
-          if (!agentDef) {
-            addMessage({ role: "error", text: `Agent "${activeAgent}" not found.` });
-            break;
-          }
-          try {
-            const filePath = resolveSessionPath(agentDef.workfolder);
-            writeSessionFile(filePath, activeAgent, history);
-            addMessage({ role: "info", text: `Context saved to ${filePath}` });
-          } catch (err) {
-            addMessage({ role: "error", text: `Failed to save: ${err instanceof Error ? err.message : String(err)}` });
-          }
-          break;
-        }
-
         case "abort":
           if (isThinking && abortRef.current) {
             abortRef.current.abort();
@@ -287,7 +198,7 @@ function ChatApp({ router, defaultAgentName, logger, agentConfig }: ChatProps) {
           break;
 
         default:
-          addMessage({ role: "error", text: `Unknown command: /${cmd}\n${buildHelp()}` });
+          addMessage({ role: "error", text: `Unknown command: /${cmd}\n${buildHelp("cli")}` });
       }
 
       return true;
@@ -302,16 +213,27 @@ function ChatApp({ router, defaultAgentName, logger, agentConfig }: ChatProps) {
 
       setInput("");
 
-      if (handleCommand(trimmed)) return;
+      void handleCommand(trimmed).then((handled) => {
+        if (handled) return;
 
       addMessage({ role: "user", text: trimmed });
       setIsThinking(true);
       const abort = new AbortController();
       abortRef.current = abort;
+      const startedAt = Date.now();
 
       router
         .resolve(trimmed, activeAgent)
         .then((resolved) => {
+          const lastActivity = lastActivityRef.current.get(resolved.agentDef.name);
+          if (lastActivity !== undefined && Date.now() - lastActivity > 60 * 60 * 1000) {
+            const expiredHistory = historiesRef.current.get(resolved.agentDef.name);
+            if (expiredHistory) autoSaveSession(resolved.agentDef.workfolder, resolved.agentDef.name, expiredHistory);
+            historiesRef.current.delete(resolved.agentDef.name);
+            addMessage({ role: "info", text: "Session expired — context reset." });
+          }
+          lastActivityRef.current.set(resolved.agentDef.name, Date.now());
+
           const existing = historiesRef.current.get(resolved.agentDef.name);
           const history = existing ?? loadDefaultContextMessages(resolved.agentDef);
           return runAgentLoop(
@@ -324,6 +246,9 @@ function ChatApp({ router, defaultAgentName, logger, agentConfig }: ChatProps) {
             undefined,
             resolved.context,
             abort.signal,
+            undefined,
+            resolved.agentDef.workfolder,
+            resolved.agentDef.name,
           ).then((result) => {
             const compactedMessages = offloadToolOutputs(
               result.messages,
@@ -338,6 +263,8 @@ function ChatApp({ router, defaultAgentName, logger, agentConfig }: ChatProps) {
               model: resolved.connection.modelId(),
               tokensPerSecond: result.stats.tokensPerSecond,
               contextTokens,
+              iterations: result.iterations,
+              durationMs: Date.now() - startedAt,
             });
 
             const label =
@@ -359,6 +286,7 @@ function ChatApp({ router, defaultAgentName, logger, agentConfig }: ChatProps) {
           abortRef.current = null;
           setIsThinking(false);
         });
+      }); // end handleCommand().then()
     },
     [isThinking, activeAgent, router, logger, agentConfig, handleCommand, addMessage],
   );

@@ -12,6 +12,7 @@ export class ClaudeTokenModelConnection extends BaseModelConnection {
   constructor(
     private model: string,
     private logger: Logger,
+    private apiKey?: string,
   ) {
     super();
   }
@@ -38,6 +39,7 @@ export class ClaudeTokenModelConnection extends BaseModelConnection {
       const result = spawnSync("claude", ["-p", "ping", "--output-format", "json"], {
         encoding: "utf-8",
         timeout: 30_000,
+        env: this.spawnEnv(),
       });
       if (result.status !== 0) return false;
       JSON.parse(result.stdout);
@@ -70,6 +72,7 @@ export class ClaudeTokenModelConnection extends BaseModelConnection {
       encoding: "utf-8",
       timeout: 120_000,
       maxBuffer: 10 * 1024 * 1024,
+      env: this.spawnEnv(),
     });
 
     if (result.error) {
@@ -105,6 +108,11 @@ export class ClaudeTokenModelConnection extends BaseModelConnection {
     });
 
     return { text, toolCalls, raw };
+  }
+
+  private spawnEnv(): NodeJS.ProcessEnv {
+    if (!this.apiKey) return process.env;
+    return { ...process.env, ANTHROPIC_API_KEY: this.apiKey };
   }
 
   private parseCliOutput(raw: string): { text: string; isError: boolean; error?: string } {

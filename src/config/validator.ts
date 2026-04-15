@@ -50,8 +50,8 @@ export function validateConfig(config: unknown): ValidationResult {
         if (modelNames.has(m.name)) errors.push(`models[${i}]: duplicate name "${m.name}"`);
         modelNames.add(m.name);
       }
-      if (m.type !== "claude-cli" && m.type !== "claude-api" && m.type !== "ollama") {
-        errors.push(`models[${i}].type must be "claude-cli", "claude-api", or "ollama"`);
+      if (m.type !== "claude-cli" && m.type !== "claude-api" && m.type !== "ollama" && m.type !== "openrouter") {
+        errors.push(`models[${i}].type must be "claude-cli", "claude-api", "ollama", or "openrouter"`);
       }
       if (m.model !== undefined && typeof m.model !== "string") {
         errors.push(`models[${i}].model must be a string if provided`);

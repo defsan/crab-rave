@@ -4,7 +4,8 @@ import os from "node:os";
 import type { AgentDef } from "../config/types.js";
 import type { Message } from "../agent/types.js";
 
-const CONTEXT_FILES = ["AGENT.md", "MEMORY.md"];
+/** Checked in order during auto-discovery; first match wins, nothing else is loaded. */
+const AUTO_DISCOVER_FILES = ["AGENTS.md", "AGENT.md"];
 
 function expandPath(p: string): string {
   if (p === "~") return os.homedir();
@@ -12,27 +13,54 @@ function expandPath(p: string): string {
   return p;
 }
 
-/** Reads AGENT.md and MEMORY.md from workfolder if they exist.
- *  Returns a formatted string to inject into the system prompt, or undefined. */
-export function loadAgentContext(workfolder: string): string | undefined {
-  const dir = expandPath(workfolder);
-  const parts: string[] = [];
+/**
+ * Returns context to inject into the system prompt.
+ *
+ * If `agentDef.default_context` is set those files are used exclusively —
+ * every file must exist or a configuration error is thrown.
+ *
+ * Otherwise auto-discovery kicks in: the first of AGENTS.md / AGENT.md found
+ * in the workfolder is used and nothing else is loaded.
+ */
+export function loadAgentContext(agentDef: AgentDef): string | undefined {
+  const dir = expandPath(agentDef.workfolder);
 
-  for (const filename of CONTEXT_FILES) {
-    const filepath = path.join(dir, filename);
-    if (existsSync(filepath)) {
+  if (agentDef.default_context?.length) {
+    const parts: string[] = [];
+    for (const filename of agentDef.default_context) {
+      const filepath = path.join(dir, filename);
+      if (!existsSync(filepath)) {
+        throw new Error(
+          `Configuration error: default_context file "${filename}" not found in ${dir}`,
+        );
+      }
       const content = readFileSync(filepath, "utf-8").trim();
       if (content) {
         parts.push(`## ${filename}\n\n${content}`);
       }
     }
+    return parts.length > 0 ? parts.join("\n\n") : undefined;
   }
 
-  return parts.length > 0 ? parts.join("\n\n") : undefined;
+  // Auto-discovery: first of AGENTS.md / AGENT.md wins; skip everything else.
+  for (const filename of AUTO_DISCOVER_FILES) {
+    const filepath = path.join(dir, filename);
+    if (existsSync(filepath)) {
+      const content = readFileSync(filepath, "utf-8").trim();
+      if (content) {
+        return `## ${filename}\n\n${content}`;
+      }
+    }
+  }
+
+  return undefined;
 }
 
-/** Builds initial history messages from agentDef.default_context files.
- *  Returns an empty array if no files are configured or none exist. */
+/**
+ * Builds initial history messages from agentDef.default_context files.
+ * Returns an empty array if no files are configured.
+ * Throws a configuration error if a configured file does not exist.
+ */
 export function loadDefaultContextMessages(agentDef: AgentDef): Message[] {
   if (!agentDef.default_context?.length) return [];
 
@@ -42,12 +70,15 @@ export function loadDefaultContextMessages(agentDef: AgentDef): Message[] {
 
   for (const filename of agentDef.default_context) {
     const filepath = path.join(dir, filename);
-    if (existsSync(filepath)) {
-      const content = readFileSync(filepath, "utf-8").trim();
-      if (content) {
-        parts.push(`## ${filename}\n\n${content}`);
-        loaded.push(filename);
-      }
+    if (!existsSync(filepath)) {
+      throw new Error(
+        `Configuration error: default_context file "${filename}" not found in ${dir}`,
+      );
+    }
+    const content = readFileSync(filepath, "utf-8").trim();
+    if (content) {
+      parts.push(`## ${filename}\n\n${content}`);
+      loaded.push(filename);
     }
   }
 
